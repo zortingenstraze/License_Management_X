@@ -481,6 +481,7 @@ class License_Manager_Admin {
                             <th><?php _e('Durum', 'license-manager'); ?></th>
                             <th><?php _e('Geçerlilik Tarihi', 'license-manager'); ?></th>
                             <th><?php _e('Kullanıcı Limiti', 'license-manager'); ?></th>
+                            <th><?php _e('Modüller', 'license-manager'); ?></th>
                             <th><?php _e('İzinli Web Siteleri', 'license-manager'); ?></th>
                             <th><?php _e('İşlemler', 'license-manager'); ?></th>
                         </tr>
@@ -553,6 +554,40 @@ class License_Manager_Admin {
                                 default:
                                     $status_text = __('Belirsiz', 'license-manager');
                             }
+                            
+                            // Get modules for this license
+                            $modules_display = '';
+                            if ($this->db->is_new_structure_available()) {
+                                $db_v2 = $this->db->get_db_v2();
+                                $license_modules = $db_v2->get_license_modules($license->id);
+                                if (!empty($license_modules)) {
+                                    $module_names = array_map(function($module) {
+                                        return $module->name;
+                                    }, $license_modules);
+                                    
+                                    if (count($module_names) > 3) {
+                                        // Show first 3 modules and count of remaining
+                                        $modules_display = implode('<br>', array_slice($module_names, 0, 3));
+                                        $remaining = count($module_names) - 3;
+                                        $modules_display .= '<br><small>+' . $remaining . ' ' . __('daha', 'license-manager') . '</small>';
+                                    } else {
+                                        $modules_display = implode('<br>', $module_names);
+                                    }
+                                } else {
+                                    $modules_display = '<em>' . __('Modül atanmamış', 'license-manager') . '</em>';
+                                }
+                            } else {
+                                // Fallback: get modules from taxonomy
+                                $terms = wp_get_post_terms($license->id, 'lm_modules');
+                                if (!empty($terms) && !is_wp_error($terms)) {
+                                    $module_names = array_map(function($term) {
+                                        return $term->name;
+                                    }, $terms);
+                                    $modules_display = implode('<br>', $module_names);
+                                } else {
+                                    $modules_display = '<em>' . __('Modül atanmamış', 'license-manager') . '</em>';
+                                }
+                            }
                         ?>
                         <tr>
                             <td><code><?php echo esc_html($license->license_key); ?></code></td>
@@ -560,6 +595,7 @@ class License_Manager_Admin {
                             <td><?php echo $status_text; ?></td>
                             <td><?php echo esc_html($expiry_text); ?></td>
                             <td><?php echo esc_html($license->user_limit ?: __('Sınırsız', 'license-manager')); ?></td>
+                            <td><?php echo $modules_display; ?></td>
                             <td><?php echo $domains_display; ?></td>
                             <td>
                                 <a href="<?php echo admin_url('admin.php?page=license-manager-edit-license&license_id=' . $license->id); ?>" class="button button-small">
@@ -1830,26 +1866,47 @@ class License_Manager_Admin {
             wp_die(__('Paket adı gereklidir.', 'license-manager'));
         }
         
-        // Create package post
-        $package_id = wp_insert_post(array(
-            'post_title' => $package_name,
-            'post_content' => $description,
-            'post_type' => 'lm_license_package',
-            'post_status' => 'publish',
-            'meta_input' => array(
-                '_duration' => $duration,
-                '_user_limit' => $user_limit,
-                '_price' => $price,
-                '_modules' => $modules,
-            )
-        ));
-        
-        if (is_wp_error($package_id)) {
-            wp_die(__('Lisans paketi eklenirken hata oluştu.', 'license-manager'));
+        // Convert duration to days
+        $duration_days = 365; // Default to yearly
+        switch ($duration) {
+            case 'monthly':
+                $duration_days = 30;
+                break;
+            case 'yearly':
+                $duration_days = 365;
+                break;
+            case 'lifetime':
+                $duration_days = 0; // 0 indicates lifetime
+                break;
+            default:
+                if (is_numeric($duration)) {
+                    $duration_days = intval($duration);
+                }
         }
         
-        // Set modules if provided - already stored in meta above, now store in taxonomy too
-        if (!empty($modules)) {
+        // Use unified database method
+        $database = new License_Manager_Database();
+        $package_id = $database->add_package(
+            $package_name,
+            $description,
+            $price,
+            $duration_days,
+            $user_limit,
+            $modules, // features/modules
+            true // is_active
+        );
+        
+        if (is_wp_error($package_id)) {
+            wp_die($package_id->get_error_message());
+        }
+        
+        // Handle modules assignment if new structure is available and modules provided
+        if ($database->is_new_structure_available() && !empty($modules)) {
+            $db_v2 = $database->get_db_v2();
+            // For packages in new structure, modules are already stored in the features field
+            // No need for additional module associations like licenses have
+        } elseif (!empty($modules)) {
+            // Fallback: set modules in taxonomy for old system
             wp_set_object_terms($package_id, $modules, 'lm_modules');
         }
         
@@ -2210,32 +2267,22 @@ class License_Manager_Admin {
         }
         
         $license_id = intval($_GET['license_id']);
-        $license = get_post($license_id);
         
-        if (!$license || $license->post_type !== 'lm_license') {
+        // Use unified database to get license
+        $database = new License_Manager_Database();
+        $license = $database->get_license($license_id);
+        
+        if (!$license) {
             wp_die(__('Geçersiz lisans ID.', 'license-manager'));
         }
         
-        // Get customers for dropdown
-        $customers = get_posts(array(
-            'post_type' => 'lm_customer',
-            'post_status' => 'publish',
-            'numberposts' => -1,
-            'orderby' => 'title',
-            'order' => 'ASC'
-        ));
+        // Get customers for dropdown using unified database
+        $customers = $database->get_customers(1000, 0);
         
-        // Get packages for dropdown
-        $packages = get_posts(array(
-            'post_type' => 'lm_license_package',
-            'post_status' => 'publish',
-            'numberposts' => -1,
-            'orderby' => 'title',
-            'order' => 'ASC'
-        ));
+        // Get packages for dropdown using unified database
+        $packages = $database->get_packages(1000, 0);
         
-        // Get modules - ensure they exist with better error handling
-        $database = new License_Manager_Database();
+        // Get modules using unified database
         $modules = $database->get_available_modules();
         
         // If no modules found, force create them and try again
@@ -2244,22 +2291,21 @@ class License_Manager_Admin {
             $modules = $database->get_available_modules();
         }
         
-        // Get current license data
-        $license_key = get_post_meta($license_id, '_license_key', true);
-        $customer_id = get_post_meta($license_id, '_customer_id', true);
-        $package_id = get_post_meta($license_id, '_package_id', true);
-        $license_type = get_post_meta($license_id, '_license_type', true);
-        $expires_on = get_post_meta($license_id, '_expires_on', true);
-        $user_limit = get_post_meta($license_id, '_user_limit', true);
-        $allowed_domains = get_post_meta($license_id, '_allowed_domains', true);
-        $status = get_post_meta($license_id, '_status', true);
-        
-        // Get current modules - check both taxonomy and meta for consistency
-        $current_modules = wp_get_post_terms($license_id, 'lm_modules');
+        // Get current modules for this license
         $current_module_slugs = array();
-        if (!is_wp_error($current_modules) && !empty($current_modules)) {
-            foreach ($current_modules as $module) {
+        if ($database->is_new_structure_available()) {
+            $db_v2 = $database->get_db_v2();
+            $license_modules = $db_v2->get_license_modules($license_id);
+            foreach ($license_modules as $module) {
                 $current_module_slugs[] = $module->slug;
+            }
+        } else {
+            // Fallback: get modules from taxonomy
+            $current_modules = wp_get_post_terms($license_id, 'lm_modules');
+            if (!is_wp_error($current_modules) && !empty($current_modules)) {
+                foreach ($current_modules as $module) {
+                    $current_module_slugs[] = $module->slug;
+                }
             }
         }
         
@@ -2305,8 +2351,8 @@ class License_Manager_Admin {
                             <select id="customer_id" name="customer_id" required>
                                 <option value=""><?php _e('Müşteri Seçin', 'license-manager'); ?></option>
                                 <?php foreach ($customers as $customer) : ?>
-                                    <option value="<?php echo esc_attr($customer->ID); ?>" <?php selected($customer_id, $customer->ID); ?>>
-                                        <?php echo esc_html($customer->post_title); ?>
+                                    <option value="<?php echo esc_attr($customer->id); ?>" <?php selected($license->customer_id, $customer->id); ?>>
+                                        <?php echo esc_html($customer->name); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -2320,8 +2366,8 @@ class License_Manager_Admin {
                             <select id="package_id" name="package_id">
                                 <option value=""><?php _e('Paket Seçin (İsteğe Bağlı)', 'license-manager'); ?></option>
                                 <?php foreach ($packages as $package) : ?>
-                                    <option value="<?php echo esc_attr($package->ID); ?>" <?php selected($package_id, $package->ID); ?>>
-                                        <?php echo esc_html($package->post_title); ?>
+                                    <option value="<?php echo esc_attr($package->id); ?>" <?php selected($license->package_id, $package->id); ?>>
+                                        <?php echo esc_html($package->name); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -2334,10 +2380,10 @@ class License_Manager_Admin {
                         </th>
                         <td>
                             <select id="license_type" name="license_type" required>
-                                <option value="monthly" <?php selected($license_type, 'monthly'); ?>><?php _e('Aylık', 'license-manager'); ?></option>
-                                <option value="yearly" <?php selected($license_type, 'yearly'); ?>><?php _e('Yıllık', 'license-manager'); ?></option>
-                                <option value="lifetime" <?php selected($license_type, 'lifetime'); ?>><?php _e('Yaşam Boyu', 'license-manager'); ?></option>
-                                <option value="trial" <?php selected($license_type, 'trial'); ?>><?php _e('Deneme', 'license-manager'); ?></option>
+                                <option value="monthly" <?php selected($license->license_type, 'monthly'); ?>><?php _e('Aylık', 'license-manager'); ?></option>
+                                <option value="yearly" <?php selected($license->license_type, 'yearly'); ?>><?php _e('Yıllık', 'license-manager'); ?></option>
+                                <option value="lifetime" <?php selected($license->license_type, 'lifetime'); ?>><?php _e('Yaşam Boyu', 'license-manager'); ?></option>
+                                <option value="trial" <?php selected($license->license_type, 'trial'); ?>><?php _e('Deneme', 'license-manager'); ?></option>
                             </select>
                         </td>
                     </tr>
@@ -2346,7 +2392,7 @@ class License_Manager_Admin {
                             <label for="expires_on"><?php _e('Geçerlilik Tarihi', 'license-manager'); ?></label>
                         </th>
                         <td>
-                            <input type="date" id="expires_on" name="expires_on" value="<?php echo esc_attr($expires_on); ?>" />
+                            <input type="date" id="expires_on" name="expires_on" value="<?php echo esc_attr($license->expires_on); ?>" />
                             <p class="description"><?php _e('Boş bırakırsanız lisans türüne göre otomatik hesaplanır.', 'license-manager'); ?></p>
                         </td>
                     </tr>
@@ -2355,7 +2401,7 @@ class License_Manager_Admin {
                             <label for="user_limit"><?php _e('Kullanıcı Limiti', 'license-manager'); ?></label>
                         </th>
                         <td>
-                            <input type="number" id="user_limit" name="user_limit" min="1" value="<?php echo esc_attr($user_limit); ?>" />
+                            <input type="number" id="user_limit" name="user_limit" min="1" value="<?php echo esc_attr($license->user_limit); ?>" />
                             <p class="description"><?php _e('Boş bırakırsanız varsayılan limit kullanılır.', 'license-manager'); ?></p>
                         </td>
                     </tr>
@@ -2364,7 +2410,7 @@ class License_Manager_Admin {
                             <label for="allowed_domains"><?php _e('İzin Verilen Domain\'ler', 'license-manager'); ?></label>
                         </th>
                         <td>
-                            <textarea id="allowed_domains" name="allowed_domains" class="large-text" rows="3" placeholder="<?php _e('Her satıra bir domain yazın (örn: example.com)', 'license-manager'); ?>"><?php echo esc_textarea($allowed_domains); ?></textarea>
+                            <textarea id="allowed_domains" name="allowed_domains" class="large-text" rows="3" placeholder="<?php _e('Her satıra bir domain yazın (örn: example.com)', 'license-manager'); ?>"><?php echo esc_textarea($license->allowed_domains); ?></textarea>
                             <p class="description"><?php _e('Bu lisansın kullanılabileceği domain\'leri belirtin.', 'license-manager'); ?></p>
                         </td>
                     </tr>
@@ -2374,10 +2420,10 @@ class License_Manager_Admin {
                         </th>
                         <td>
                             <select id="status" name="status" required>
-                                <option value="active" <?php selected($status, 'active'); ?>><?php _e('Aktif', 'license-manager'); ?></option>
-                                <option value="expired" <?php selected($status, 'expired'); ?>><?php _e('Süresi Dolmuş', 'license-manager'); ?></option>
-                                <option value="invalid" <?php selected($status, 'invalid'); ?>><?php _e('Geçersiz', 'license-manager'); ?></option>
-                                <option value="suspended" <?php selected($status, 'suspended'); ?>><?php _e('Askıya Alınmış', 'license-manager'); ?></option>
+                                <option value="active" <?php selected($license->status, 'active'); ?>><?php _e('Aktif', 'license-manager'); ?></option>
+                                <option value="expired" <?php selected($license->status, 'expired'); ?>><?php _e('Süresi Dolmuş', 'license-manager'); ?></option>
+                                <option value="invalid" <?php selected($license->status, 'invalid'); ?>><?php _e('Geçersiz', 'license-manager'); ?></option>
+                                <option value="suspended" <?php selected($license->status, 'suspended'); ?>><?php _e('Askıya Alınmış', 'license-manager'); ?></option>
                             </select>
                         </td>
                     </tr>
@@ -2558,18 +2604,21 @@ class License_Manager_Admin {
         }
         
         $license_id = intval($_POST['license_id']);
-        $license = get_post($license_id);
         
-        if (!$license || $license->post_type !== 'lm_license') {
+        // Use unified database to get license
+        $database = new License_Manager_Database();
+        $license = $database->get_license($license_id);
+        
+        if (!$license) {
             wp_die(__('Geçersiz lisans ID.', 'license-manager'));
         }
         
         // Sanitize input data
         $customer_id = intval($_POST['customer_id']);
-        $package_id = intval($_POST['package_id']);
+        $package_id = !empty($_POST['package_id']) ? intval($_POST['package_id']) : null;
         $license_type = sanitize_text_field($_POST['license_type']);
         $expires_on = sanitize_text_field($_POST['expires_on']);
-        $user_limit = intval($_POST['user_limit']);
+        $user_limit = !empty($_POST['user_limit']) ? intval($_POST['user_limit']) : get_option('license_manager_default_user_limit', 5);
         $allowed_domains = sanitize_textarea_field($_POST['allowed_domains']);
         $status = sanitize_text_field($_POST['status']);
         $modules = isset($_POST['modules']) ? array_map('sanitize_text_field', $_POST['modules']) : array();
@@ -2589,32 +2638,47 @@ class License_Manager_Admin {
         
         // Calculate expiration date if not provided
         if (empty($expires_on) && $license_type !== 'lifetime') {
-            $expires_on = $this->calculate_expiration_date($license_type);
+            $expires_on = $this->calculate_expiry_date($license_type);
         }
         
-        // Use default user limit if not provided
-        if (empty($user_limit)) {
-            $user_limit = get_option('license_manager_default_user_limit', 5);
+        // Update license using unified database
+        $update_data = array(
+            'customer_id' => $customer_id,
+            'package_id' => $package_id,
+            'license_type' => $license_type,
+            'expires_on' => $expires_on,
+            'user_limit' => $user_limit,
+            'allowed_domains' => $allowed_domains,
+            'status' => $status
+        );
+        
+        $result = $database->update_license($license_id, $update_data);
+        
+        if (is_wp_error($result)) {
+            wp_die($result->get_error_message());
         }
         
-        // Update license metadata
-        update_post_meta($license_id, '_customer_id', $customer_id);
-        update_post_meta($license_id, '_package_id', $package_id);
-        update_post_meta($license_id, '_license_type', $license_type);
-        update_post_meta($license_id, '_expires_on', $expires_on);
-        update_post_meta($license_id, '_user_limit', $user_limit);
-        update_post_meta($license_id, '_allowed_domains', $allowed_domains);
-        update_post_meta($license_id, '_status', $status);
-        
-        // Update modules - store in both meta and taxonomy for consistency
-        update_post_meta($license_id, '_modules', $modules);
-        wp_set_object_terms($license_id, $modules, 'lm_modules');
-        
-        // Update license type taxonomy
-        wp_set_object_terms($license_id, $license_type, 'lm_license_type');
-        
-        // Update license status taxonomy
-        wp_set_object_terms($license_id, $status, 'lm_license_status');
+        // Handle modules assignment if new structure is available
+        if ($database->is_new_structure_available()) {
+            $db_v2 = $database->get_db_v2();
+            
+            // First, remove all existing module associations
+            $existing_modules = $db_v2->get_license_modules($license_id);
+            foreach ($existing_modules as $existing_module) {
+                $db_v2->remove_license_module($license_id, $existing_module->id);
+            }
+            
+            // Add new module associations
+            foreach ($modules as $module_slug) {
+                $module = $db_v2->get_module_by_slug($module_slug);
+                if ($module) {
+                    $db_v2->add_license_module($license_id, $module->id);
+                }
+            }
+        } else {
+            // Fallback: update modules in taxonomy for old system
+            wp_set_object_terms($license_id, $modules, 'lm_modules');
+        }
         
         // Redirect with success message
         wp_redirect(admin_url('admin.php?page=license-manager-edit-license&license_id=' . $license_id . '&updated=1'));
