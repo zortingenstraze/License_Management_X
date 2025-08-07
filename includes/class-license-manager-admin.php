@@ -1576,6 +1576,15 @@ class License_Manager_Admin {
                         </td>
                     </tr>
                     <?php endif; ?>
+                    <tr>
+                        <th scope="row">
+                            <label for="notes"><?php _e('Notlar', 'license-manager'); ?></label>
+                        </th>
+                        <td>
+                            <textarea id="notes" name="notes" class="large-text" rows="3" placeholder="<?php _e('Lisans hakkında notlar...', 'license-manager'); ?>"></textarea>
+                            <p class="description"><?php _e('Bu lisans hakkında ek notlar ekleyin.', 'license-manager'); ?></p>
+                        </td>
+                    </tr>
                 </table>
                 
                 <?php submit_button(__('Lisans Ekle', 'license-manager')); ?>
@@ -1791,11 +1800,10 @@ class License_Manager_Admin {
         // Handle modules assignment if new structure is available
         if ($database->is_new_structure_available() && !empty($modules)) {
             $db_v2 = $database->get_db_v2();
-            foreach ($modules as $module_slug) {
-                $module = $db_v2->get_module_by_slug($module_slug);
-                if ($module) {
-                    $db_v2->add_license_module($license_id, $module->id);
-                }
+            $result = $db_v2->assign_modules_to_license($license_id, $modules);
+            if (is_wp_error($result)) {
+                // Log the error but don't stop the process
+                error_log('Failed to assign modules to license: ' . $result->get_error_message());
             }
         } elseif (!empty($modules)) {
             // Fallback: set modules in taxonomy for old system
@@ -2158,11 +2166,12 @@ class License_Manager_Admin {
             wp_die(__('Yetkisiz erişim.', 'license-manager'));
         }
         
-        // Delete license
-        $deleted = wp_delete_post($license_id, true);
+        // Use unified database method
+        $database = new License_Manager_Database();
+        $result = $database->delete_license($license_id);
         
-        if (!$deleted) {
-            wp_die(__('Lisans silinirken hata oluştu.', 'license-manager'));
+        if (is_wp_error($result)) {
+            wp_die($result->get_error_message());
         }
         
         // Redirect with success message
@@ -2558,21 +2567,25 @@ class License_Manager_Admin {
         }
         
         $license_id = intval($_POST['license_id']);
-        $license = get_post($license_id);
         
-        if (!$license || $license->post_type !== 'lm_license') {
+        // Use unified database method to check license existence
+        $database = new License_Manager_Database();
+        $existing_license = $database->get_license($license_id);
+        
+        if (!$existing_license) {
             wp_die(__('Geçersiz lisans ID.', 'license-manager'));
         }
         
         // Sanitize input data
         $customer_id = intval($_POST['customer_id']);
-        $package_id = intval($_POST['package_id']);
+        $package_id = !empty($_POST['package_id']) ? intval($_POST['package_id']) : null;
         $license_type = sanitize_text_field($_POST['license_type']);
         $expires_on = sanitize_text_field($_POST['expires_on']);
         $user_limit = intval($_POST['user_limit']);
         $allowed_domains = sanitize_textarea_field($_POST['allowed_domains']);
         $status = sanitize_text_field($_POST['status']);
         $modules = isset($_POST['modules']) ? array_map('sanitize_text_field', $_POST['modules']) : array();
+        $notes = sanitize_textarea_field($_POST['notes'] ?? '');
         
         // Validate required fields
         if (empty($customer_id)) {
@@ -2589,7 +2602,7 @@ class License_Manager_Admin {
         
         // Calculate expiration date if not provided
         if (empty($expires_on) && $license_type !== 'lifetime') {
-            $expires_on = $this->calculate_expiration_date($license_type);
+            $expires_on = $this->calculate_expiry_date($license_type);
         }
         
         // Use default user limit if not provided
@@ -2597,24 +2610,39 @@ class License_Manager_Admin {
             $user_limit = get_option('license_manager_default_user_limit', 5);
         }
         
-        // Update license metadata
-        update_post_meta($license_id, '_customer_id', $customer_id);
-        update_post_meta($license_id, '_package_id', $package_id);
-        update_post_meta($license_id, '_license_type', $license_type);
-        update_post_meta($license_id, '_expires_on', $expires_on);
-        update_post_meta($license_id, '_user_limit', $user_limit);
-        update_post_meta($license_id, '_allowed_domains', $allowed_domains);
-        update_post_meta($license_id, '_status', $status);
+        // Prepare update data
+        $update_data = array(
+            'customer_id' => $customer_id,
+            'package_id' => $package_id,
+            'license_type' => $license_type,
+            'expires_on' => $expires_on,
+            'user_limit' => $user_limit,
+            'allowed_domains' => $allowed_domains,
+            'status' => $status,
+            'notes' => $notes
+        );
         
-        // Update modules - store in both meta and taxonomy for consistency
-        update_post_meta($license_id, '_modules', $modules);
-        wp_set_object_terms($license_id, $modules, 'lm_modules');
+        // Update license using unified database method
+        $result = $database->update_license($license_id, $update_data);
         
-        // Update license type taxonomy
-        wp_set_object_terms($license_id, $license_type, 'lm_license_type');
+        if (is_wp_error($result)) {
+            wp_die($result->get_error_message());
+        }
         
-        // Update license status taxonomy
-        wp_set_object_terms($license_id, $status, 'lm_license_status');
+        // Handle module assignments if new structure is available
+        if ($database->is_new_structure_available()) {
+            $db_v2 = $database->get_db_v2();
+            $module_result = $db_v2->update_license_modules($license_id, $modules);
+            if (is_wp_error($module_result)) {
+                // Log the error but don't stop the process
+                error_log('Failed to update license modules: ' . $module_result->get_error_message());
+            }
+        } else {
+            // Fallback: update modules in taxonomy for old system
+            wp_set_object_terms($license_id, $modules, 'lm_modules');
+            wp_set_object_terms($license_id, $license_type, 'lm_license_type');
+            wp_set_object_terms($license_id, $status, 'lm_license_status');
+        }
         
         // Redirect with success message
         wp_redirect(admin_url('admin.php?page=license-manager-edit-license&license_id=' . $license_id . '&updated=1'));
