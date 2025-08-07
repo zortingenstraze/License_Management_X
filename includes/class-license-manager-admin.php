@@ -39,6 +39,10 @@ class License_Manager_Admin {
         add_action('admin_post_license_manager_delete_license', array($this, 'handle_delete_license'));
         add_action('admin_post_license_manager_delete_package', array($this, 'handle_delete_package'));
         add_action('admin_post_license_manager_delete_payment', array($this, 'handle_delete_payment'));
+        
+        // AJAX actions
+        add_action('wp_ajax_get_package_modules', array($this, 'ajax_get_package_modules'));
+        add_action('wp_ajax_get_customer_licenses', array($this, 'ajax_get_customer_licenses'));
     }
     
     /**
@@ -3965,5 +3969,94 @@ class License_Manager_Admin {
         }
         
         return $results;
+    }
+    
+    /**
+     * AJAX handler to get package modules
+     */
+    public function ajax_get_package_modules() {
+        // Check nonce
+        if (!wp_verify_nonce($_POST['nonce'], 'license_manager_admin_nonce')) {
+            wp_die(__('Güvenlik kontrolü başarısız.', 'license-manager'));
+        }
+        
+        if (!current_user_can('manage_license_manager')) {
+            wp_die(__('Yetkisiz erişim.', 'license-manager'));
+        }
+        
+        $package_id = intval($_POST['package_id']);
+        
+        if (!$package_id) {
+            wp_send_json_error(__('Geçersiz paket ID.', 'license-manager'));
+        }
+        
+        // Get package details using unified database
+        $database = new License_Manager_Database();
+        $package = $database->get_package($package_id);
+        
+        if (!$package) {
+            wp_send_json_error(__('Paket bulunamadı.', 'license-manager'));
+        }
+        
+        // Get package modules if new structure is available
+        $modules = array();
+        if ($database->is_new_structure_available()) {
+            $db_v2 = $database->get_db_v2();
+            $package_modules = $db_v2->get_package_modules($package_id);
+            foreach ($package_modules as $module) {
+                $modules[] = $module->slug;
+            }
+        } else {
+            // Fallback: get modules from taxonomy for old system
+            $terms = wp_get_object_terms($package_id, 'lm_modules');
+            if (!is_wp_error($terms)) {
+                foreach ($terms as $term) {
+                    $modules[] = $term->slug;
+                }
+            }
+        }
+        
+        wp_send_json_success(array(
+            'modules' => $modules,
+            'user_limit' => isset($package->user_limit) ? $package->user_limit : null,
+            'duration_days' => isset($package->duration_days) ? $package->duration_days : null,
+            'price' => isset($package->price) ? $package->price : null
+        ));
+    }
+    
+    /**
+     * AJAX handler to get customer licenses
+     */
+    public function ajax_get_customer_licenses() {
+        // Check nonce
+        if (!wp_verify_nonce($_POST['nonce'], 'license_manager_admin_nonce')) {
+            wp_die(__('Güvenlik kontrolü başarısız.', 'license-manager'));
+        }
+        
+        if (!current_user_can('manage_license_manager')) {
+            wp_die(__('Yetkisiz erişim.', 'license-manager'));
+        }
+        
+        $customer_id = intval($_POST['customer_id']);
+        
+        if (!$customer_id) {
+            wp_send_json_error(__('Geçersiz müşteri ID.', 'license-manager'));
+        }
+        
+        // Get customer licenses using unified database
+        $database = new License_Manager_Database();
+        $licenses = $database->get_customer_licenses($customer_id);
+        
+        $license_options = array();
+        if (!empty($licenses)) {
+            foreach ($licenses as $license) {
+                $license_options[] = array(
+                    'id' => $license->id,
+                    'title' => sprintf('%s (%s)', $license->license_key, $license->status)
+                );
+            }
+        }
+        
+        wp_send_json_success($license_options);
     }
 }
