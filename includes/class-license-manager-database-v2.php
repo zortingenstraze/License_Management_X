@@ -920,6 +920,58 @@ class License_Manager_Database_V2 {
         return $result !== false;
     }
     
+    /**
+     * Assign multiple modules to a license (replaces existing assignments)
+     */
+    public function assign_modules_to_license($license_id, $module_slugs) {
+        if (!$this->is_new_structure_available()) {
+            return new WP_Error('structure_unavailable', 'New database structure not available');
+        }
+        
+        // First, remove all existing module assignments for this license
+        $this->wpdb->delete(
+            $this->license_modules_table,
+            array('license_id' => $license_id),
+            array('%d')
+        );
+        
+        // Then add the new module assignments
+        if (!empty($module_slugs)) {
+            foreach ($module_slugs as $module_slug) {
+                $module = $this->get_module_by_slug($module_slug);
+                if ($module) {
+                    $this->add_license_module($license_id, $module->id);
+                }
+            }
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Update license modules (replaces existing assignments)
+     */
+    public function update_license_modules($license_id, $module_slugs) {
+        return $this->assign_modules_to_license($license_id, $module_slugs);
+    }
+    
+    /**
+     * Remove all modules from a license
+     */
+    public function remove_all_license_modules($license_id) {
+        if (!$this->is_new_structure_available()) {
+            return new WP_Error('structure_unavailable', 'New database structure not available');
+        }
+        
+        $result = $this->wpdb->delete(
+            $this->license_modules_table,
+            array('license_id' => $license_id),
+            array('%d')
+        );
+        
+        return $result !== false;
+    }
+    
     // =====================================
     // PACKAGE CRUD METHODS
     // =====================================
@@ -1097,6 +1149,34 @@ class License_Manager_Database_V2 {
         }
         
         return true;
+    }
+    
+    /**
+     * Get package modules
+     */
+    public function get_package_modules($package_id) {
+        if (!$this->is_new_structure_available()) {
+            return array();
+        }
+        
+        // For now, packages don't have direct module associations in the database
+        // This would need a package_modules table, but for simplicity, 
+        // we'll return modules based on package features or return all modules
+        return $this->get_available_modules();
+    }
+    
+    /**
+     * Get customer licenses
+     */
+    public function get_customer_licenses($customer_id) {
+        if (!$this->is_new_structure_available()) {
+            return array();
+        }
+        
+        return $this->wpdb->get_results($this->wpdb->prepare(
+            "SELECT * FROM {$this->licenses_table} WHERE customer_id = %d ORDER BY created_at DESC",
+            $customer_id
+        ));
     }
     
     // =====================================

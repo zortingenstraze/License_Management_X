@@ -21,6 +21,7 @@
         initFormValidation();
         initAjaxHandlers();
         initPaymentTabs();
+        initPackageModuleSelection();
     }
 
     /**
@@ -568,6 +569,76 @@
                           window.pagenow.indexOf('license-manager-edit-module') !== -1)) {
         $(document).ready(function() {
             initModuleManager();
+        });
+    }
+    
+    /**
+     * Initialize package-based module selection
+     */
+    function initPackageModuleSelection() {
+        // Handle package selection change
+        $('#package_id').on('change', function() {
+            var packageId = $(this).val();
+            
+            if (packageId) {
+                // Get package modules via AJAX
+                $.post(licenseManagerAdmin.ajaxurl, {
+                    action: 'get_package_modules',
+                    package_id: packageId,
+                    nonce: licenseManagerAdmin.nonce
+                })
+                .done(function(response) {
+                    if (response.success && response.data) {
+                        // First, uncheck all modules
+                        $('input[name="modules[]"]').prop('checked', false);
+                        
+                        // Then check the package modules
+                        if (response.data.modules && response.data.modules.length > 0) {
+                            response.data.modules.forEach(function(moduleSlug) {
+                                $('input[name="modules[]"][value="' + moduleSlug + '"]').prop('checked', true);
+                            });
+                            
+                            showNotice('info', 'Paket modülleri otomatik olarak seçildi.');
+                        }
+                        
+                        // Update other fields if available
+                        if (response.data.user_limit) {
+                            $('#user_limit').val(response.data.user_limit);
+                        }
+                        
+                        if (response.data.duration_days) {
+                            // Calculate expiry date based on duration
+                            var currentDate = new Date();
+                            currentDate.setDate(currentDate.getDate() + parseInt(response.data.duration_days));
+                            var expiryDate = currentDate.toISOString().split('T')[0];
+                            $('#expires_on').val(expiryDate);
+                        }
+                    }
+                })
+                .fail(function() {
+                    showNotice('warning', 'Paket modülleri yüklenemedi.');
+                });
+            } else {
+                // If no package selected, uncheck all modules
+                $('input[name="modules[]"]').prop('checked', false);
+            }
+        });
+        
+        // Add visual feedback for module selection
+        $('input[name="modules[]"]').on('change', function() {
+            var checkedCount = $('input[name="modules[]"]:checked').length;
+            var totalCount = $('input[name="modules[]"]').length;
+            
+            if (checkedCount > 0) {
+                $('.modules-section').addClass('has-selection');
+                if (checkedCount === totalCount) {
+                    $('.modules-section').addClass('all-selected');
+                } else {
+                    $('.modules-section').removeClass('all-selected');
+                }
+            } else {
+                $('.modules-section').removeClass('has-selection all-selected');
+            }
         });
     }
 

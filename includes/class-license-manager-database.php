@@ -1559,4 +1559,68 @@ class License_Manager_Database {
         
         return $stats;
     }
+    
+    /**
+     * Get package modules
+     */
+    public function get_package_modules($package_id) {
+        if ($this->is_new_structure_available()) {
+            return $this->get_db_v2()->get_package_modules($package_id);
+        }
+        
+        // Fallback: get modules from taxonomy for old system
+        $terms = wp_get_object_terms($package_id, 'lm_modules');
+        if (is_wp_error($terms)) {
+            return array();
+        }
+        
+        $modules = array();
+        foreach ($terms as $term) {
+            $module = new stdClass();
+            $module->id = $term->term_id;
+            $module->name = $term->name;
+            $module->slug = $term->slug;
+            $module->description = $term->description;
+            $modules[] = $module;
+        }
+        
+        return $modules;
+    }
+    
+    /**
+     * Get customer licenses
+     */
+    public function get_customer_licenses($customer_id) {
+        if ($this->is_new_structure_available()) {
+            return $this->get_db_v2()->get_customer_licenses($customer_id);
+        }
+        
+        // Fallback: get licenses from post meta for old system
+        $licenses = get_posts(array(
+            'post_type' => 'lm_license',
+            'meta_query' => array(
+                array(
+                    'key' => '_customer_id',
+                    'value' => $customer_id,
+                    'compare' => '='
+                )
+            ),
+            'posts_per_page' => -1,
+            'post_status' => 'publish'
+        ));
+        
+        $result = array();
+        foreach ($licenses as $post) {
+            $license = new stdClass();
+            $license->id = $post->ID;
+            $license->license_key = get_post_meta($post->ID, '_license_key', true);
+            $license->status = get_post_meta($post->ID, '_status', true);
+            $license->license_type = get_post_meta($post->ID, '_license_type', true);
+            $license->expires_on = get_post_meta($post->ID, '_expires_on', true);
+            $license->created_at = $post->post_date;
+            $result[] = $license;
+        }
+        
+        return $result;
+    }
 }
