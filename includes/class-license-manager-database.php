@@ -1024,7 +1024,7 @@ class License_Manager_Database {
     /**
      * Get Database V2 instance
      */
-    private function get_db_v2() {
+    public function get_db_v2() {
         if (!$this->db_v2) {
             $this->db_v2 = new License_Manager_Database_V2();
         }
@@ -1505,6 +1505,115 @@ class License_Manager_Database {
         $result = wp_delete_post($license_id, true);
         return $result !== false;
     }
+    
+    // =====================================
+    // PACKAGE CRUD WRAPPER METHODS
+    // =====================================
+    
+    /**
+     * Get all packages with pagination
+     */
+    public function get_packages($limit = 20, $offset = 0, $search = '') {
+        if ($this->is_new_structure_available()) {
+            return $this->get_db_v2()->get_packages($limit, $offset, $search);
+        }
+        
+        // Fallback to post type method
+        $args = array(
+            'post_type' => 'lm_license_package',
+            'post_status' => 'publish',
+            'posts_per_page' => $limit,
+            'offset' => $offset,
+            'orderby' => 'title',
+            'order' => 'ASC'
+        );
+        
+        if (!empty($search)) {
+            $args['s'] = $search;
+        }
+        
+        $posts = get_posts($args);
+        $packages = array();
+        
+        foreach ($posts as $post) {
+            $package = new stdClass();
+            $package->id = $post->ID;
+            $package->name = $post->post_title;
+            $package->description = $post->post_content;
+            $package->price = get_post_meta($post->ID, '_price', true) ?: 0;
+            $package->duration_days = get_post_meta($post->ID, '_duration', true) ?: 365;
+            $package->user_limit = get_post_meta($post->ID, '_user_limit', true) ?: 5;
+            $package->features = get_post_meta($post->ID, '_modules', true) ?: array();
+            $package->is_active = ($post->post_status === 'publish') ? 1 : 0;
+            $packages[] = $package;
+        }
+        
+        return $packages;
+    }
+    
+    /**
+     * Add new package
+     */
+    public function add_package($name, $description = '', $price = 0.00, $duration_days = 365, $user_limit = 5, $features = '', $is_active = true) {
+        if ($this->is_new_structure_available()) {
+            return $this->get_db_v2()->add_package($name, $description, $price, $duration_days, $user_limit, $features, $is_active);
+        }
+        
+        // Fallback: create as WordPress post
+        if (empty($name)) {
+            return new WP_Error('missing_name', 'Package name is required');
+        }
+        
+        $package_id = wp_insert_post(array(
+            'post_title' => $name,
+            'post_content' => $description,
+            'post_type' => 'lm_license_package',
+            'post_status' => $is_active ? 'publish' : 'draft',
+            'meta_input' => array(
+                '_price' => floatval($price),
+                '_duration' => intval($duration_days),
+                '_user_limit' => intval($user_limit),
+                '_modules' => $features,
+            )
+        ));
+        
+        if (is_wp_error($package_id)) {
+            return new WP_Error('insert_failed', 'Failed to insert package');
+        }
+        
+        return $package_id;
+    }
+    
+    /**
+     * Get package by ID
+     */
+    public function get_package($package_id) {
+        if ($this->is_new_structure_available()) {
+            return $this->get_db_v2()->get_package($package_id);
+        }
+        
+        // Fallback to post type method
+        $post = get_post($package_id);
+        if (!$post || $post->post_type !== 'lm_license_package') {
+            return null;
+        }
+        
+        $package = new stdClass();
+        $package->id = $post->ID;
+        $package->name = $post->post_title;
+        $package->description = $post->post_content;
+        $package->price = get_post_meta($post->ID, '_price', true) ?: 0;
+        $package->duration_days = get_post_meta($post->ID, '_duration', true) ?: 365;
+        $package->user_limit = get_post_meta($post->ID, '_user_limit', true) ?: 5;
+        $package->features = get_post_meta($post->ID, '_modules', true) ?: array();
+        $package->is_active = ($post->post_status === 'publish') ? 1 : 0;
+        
+        return $package;
+    }
+    
+    // =====================================
+    // DASHBOARD STATISTICS
+    // =====================================
     
     /**
      * Get dashboard statistics
